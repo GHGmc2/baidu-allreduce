@@ -100,7 +100,7 @@ void RingAllreduce(float* data, size_t length, float* output) {
     throw std::runtime_error("MPI_Comm_size failed with an error.");
   }
 
-  // TODO: Check that the lengths given to every process are the same.
+  // Check that the lengths given to every process are the same.
   std::vector<size_t> lengths = AllgatherInputLength(size, length);
   for (size_t other_length : lengths) {
     if (length != other_length) {
@@ -125,12 +125,15 @@ void RingAllreduce(float* data, size_t length, float* output) {
   assert(segment_ends[size - 1] == length);
 
   float* output = alloc(length);
+  // Copy your data to the output buffer to avoid modifying the input buffer.
   copy(output, data, length);
 
-  float* buf = alloc(segment_size[0]);
+  // Allocate a temporary buffer to store incoming data.
+  float* recv_buf = alloc(segment_size[0]);
 
-  // Receive from / Send to your left neighbor with wrap-around.
+  // Receive from your left neighbor with wrap-around.
   const size_t recv_from = (rank - 1 + size) % size;
+  // Send to your right neighbor with wrap-around
   const size_t send_to = (rank + 1 + size) % size;
 
   MPI_Status recv_status;
@@ -138,7 +141,8 @@ void RingAllreduce(float* data, size_t length, float* output) {
   MPI_Datatype datatype = MPI_FLOAT;
 
   // Ref: https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/
-  // ReduceScatter. At the i'th iteration, sends segment (rank - i) and receives segment (rank - i - 1).
+  // ReduceScatter.
+  // Shift left: at the i'th iteration, sends segment (rank - i) and receives segment (rank - i - 1).
   for (int i = 0; i < size - 1; ++i) {
     int recv_chunk = (rank - i - 1 + size) % size;
     int send_chunk = (rank - i + size) % size;
@@ -147,7 +151,7 @@ void RingAllreduce(float* data, size_t length, float* output) {
     float* segment_send = &(output[send_start]);
 
     // API: https://www.mpich.org/static/docs/v3.3/www3/MPI_Irecv.html
-    MPI_Irecv(buf, segment_sizes[recv_chunk], datatype, recv_from, /*tag*/0, MPI_COMM_WORLD, &recv_req);
+    MPI_Irecv(recv_buf, segment_sizes[recv_chunk], datatype, recv_from, /*tag*/0, MPI_COMM_WORLD, &recv_req);
     // API: https://www.mpich.org/static/docs/v3.3/www3/MPI_Send.html
     MPI_Send(segment_send, segment_sizes[send_chunk], datatype, send_to, 0, MPI_COMM_WORLD);
 
@@ -157,11 +161,12 @@ void RingAllreduce(float* data, size_t length, float* output) {
     // API: https://www.mpich.org/static/docs/v3.1/www3/MPI_Wait.html
     MPI_Wait(&recv_req, &recv_status);
 
-    reduce(segment_update, buf, segment_sizes[recv_chunk]);
+    // reduce received result to local chunk
+    reduce(segment_update, recv_buf, segment_sizes[recv_chunk]);
   }
 
   // Allgather
-  // At the i'th iteration, rank r, sends segment (rank + 1 - i) and receives segment (rank - i).
+  // Shift left: at the i'th iteration, sends segment (rank - i + 1) and receives segment (rank - i).
   for (int i = 0; i < size - 1; ++i) {
     int send_chunk = (rank - i + 1 + size) % size;
     int recv_chunk = (rank - i + size) % size;
@@ -177,5 +182,5 @@ void RingAllreduce(float* data, size_t length, float* output) {
                  MPI_COMM_WORLD, &recv_status);
   }
 
-  dealloc(buf);
+  dealloc(recv_buf);
 }
